@@ -1,0 +1,482 @@
+---
+title: 'PersonalWork'
+author: "Shen Xie 2020300005005@whu.edu.cn"
+date: "2022/5/11"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, echo = FALSE, message = FALSE, warning=FALSE}
+library(tidyverse)
+library(lubridate)
+library(stringr)
+library(zoo)
+```
+
+### 导入数据
+
+```{r}
+data <- read.csv("tripadvisor_content.csv", encoding="UTF-8")
+summary(data)
+```
+
+首先我们将数据导入，同时采用summary函数查看数据的基本特征，同时利用excel打开对应的csv文件与加载的csv文件进行比对，发现导入无误。
+
+接下来开始根据指引解决问题。
+
+### 问题 1：数据提取
+
+问题要求从HotelURL中提取出CityID 和 HotelID，那么首先就要知道在HotelURL中哪一部分是CityID，哪一部分是HotelID。不妨先看一个典型的数据：
+
+`https://www.tripadvisor.com/Hotel_Review-g60956-d73236-Reviews-Days_Inn_San_Antonio_Near_Lackland_AFB-San_Antonio_Texas.html`
+
+我猜测，g60956和d73236中有一个是CityID，还有一个是HotelID。通过到网站中去检验发现，g60956为CityID，而d73236为HotelID，而且这个CityID对应的正好是San Antonio，此信息也被包含在了数据中。（这里我没有理由到题目中有提示，自己又去找了一遍）接下来要做的就是通过代码将其提取并放置在HotelURL之前。
+
+```{r}
+data_ID <- data %>%
+  # 匹配符合条件的数字记号
+  mutate(CityID = str_extract(HotelURL,pattern = "(\\d+)"),
+         HotelID = str_extract(HotelURL,pattern = "-d(\\d+)"),
+         HotelID = str_extract(HotelID, pattern = "(\\d+)")
+  ) %>%
+  #变更数据类型
+  mutate(CityID = as.integer(CityID),
+         HotelID = as.integer(HotelID)) %>%
+  #重新排序
+  select(X, ReviewID, RatingDate, ReviewTitle, ReviewText, 
+         NumHelpful, AvgRatingStarsThisUser, StayDate_TravelType,
+         Via_Mobile, CityID, HotelID, HotelURL, everything())
+data_ID
+# 检查是否是无法处理的数据如含义字母的数据，无法处理的数据应当会变为NA
+data_ID %>%
+  filter(is.na(HotelID))
+data_ID %>%
+  filter(is.na(CityID))
+```
+
+### 问题 2：数据提取与转换
+
+通过观察数据：
+
+1. 所有具有日期的数据均匀Stayed开头;
+
+2. 有的用户没有填写旅行方式（直接观察就可以证实）;
+
+3. 可以确定TravelType的是最后一个单词，而且通过网页可以知道一共有五种不同的选项：
+
+我通过下面代码验证发现确实有一些数据不以Stayed开头，而它们恰好就是缺失的数据：family, solo, couple, friends, business
+
+```{r}
+# 查看不以Stayed开头的数据，发现均为空数据
+data_ID %>%
+  select(StayDate_TravelType) %>% 
+  filter(!str_detect(StayDate_TravelType,"^Stayed")) # %>%
+  # filter(StayDate_TravelType!="")
+```
+
+在证实了我的推测后，开始进行数据提取工作：
+
+```{r}
+# 构建月份的匹配模式
+pattern_month <- c("\\b(January|February|March|April|May|June|July|August|September|October|November|December) ([^ ]+)\\b")
+
+# 构建类型的匹配模式
+data_ID %>%
+  mutate(get_pattern = str_extract(StayDate_TravelType, ",.+")) %>%
+  count(get_pattern)
+# 只有五种，且均是最后一个词，但是这里我还是用先构建pattern的方法
+pattern_type <- c("\\b(family|solo|couple|friends|business)\\b")
+
+
+data_Date_temp <- data_ID %>%
+  # 提取停留日期以及旅行方式
+  mutate(StayData = str_extract(StayDate_TravelType, pattern = pattern_month),
+         TravelType = str_extract(StayDate_TravelType, pattern = pattern_type))  %>%
+  # 构建CheckData前的工作：对StayData进行调整
+  mutate(StayData = str_replace(StayData,"([^ ]+) ([^ ]+)", "\\2 \\1")) %>%
+  mutate(StayData = str_replace_all(StayData," ","-")
+  ) %>%
+  # 转化为日期型
+  mutate(StayData = ym(StayData), # 这里存在一个问题，就是会在年月后全部生成日期01，但是不影响实际结果
+         RatingDate = as.Date(RatingDate)) %>%
+  # 生成CheckData
+  mutate(CheckDate = ifelse(year(RatingDate)==year(StayData)&month(RatingDate)==month(RatingDate), T, F))
+
+# 统计出现次数最多旅行方式  
+data_Date_temp %>%
+  count(TravelType) %>%
+  arrange(desc(n))
+
+# 经过测试发现business是最多的选择，设置Traveltype因子水平
+data_Date <- data_Date_temp %>%
+  mutate(TravelType = fct_relevel(TravelType,"business")) %>%
+  # 重新排列列的顺序，将CheckData放在TravelType后面
+  select(X, ReviewID, RatingDate, ReviewTitle, ReviewText,
+         NumHelpful, AvgRatingStarsThisUser, StayDate_TravelType, StayData, TravelType, CheckDate, everything())
+data_Date
+
+
+# test1: 数据类型是否正确
+is.Date(data_Date$StayData)
+is.Date(data_Date$RatingDate)
+# 注意区分一下typeof()，返回的是数据的类型而不是数据类型
+typeof(data_Date$StayData)
+typeof(data_Date$RatingDate)
+
+# test2: 新生成的列最终结果有无NA？如果有可能是什么造成？
+# test2.1:对于StayData和CheckDate
+data_Date %>%
+  filter(is.na(StayData)) %>%
+  nrow(.)
+data_Date %>%
+  filter(is.na(CheckDate)) %>%
+  nrow(.)
+data_Date %>%
+  filter(StayDate_TravelType=="") %>%
+  nrow(.)
+# 有可能是空格，是否一一对应？
+data_Date_test1 <- data_Date %>%
+  filter(StayDate_TravelType=="") %>%
+  select(StayDate_TravelType, StayData, CheckDate)
+data_Date_test1
+# test2.2：对于TravelType
+data_Date %>%
+  filter(is.na(TravelType)) %>%
+  nrow(.)
+data_Date %>%
+  filter(!str_detect(StayDate_TravelType,",")) %>%
+  nrow(.)
+# 是否一一对应？
+data_Date_test2 <- data_Date %>%
+  filter(!str_detect(StayDate_TravelType,",")) %>%
+  select(StayDate_TravelType, TravelType)
+data_Date_test2
+```
+
+### 问题 3：规范化小表的生成与表连接
+
+首先得到以HotelID为主键的Hotel表格：
+
+```{r}
+Hotel <- data_Date %>%
+  select(HotelID, HotelURL, StarClass, PriceRange, Services) %>%
+  group_by(HotelID) %>%
+  slice(1)
+Hotel
+# 检查是否正确
+data_Date %>%
+  count(HotelID) %>%
+  nrow(.)
+Hotel %>%
+  nrow(.)
+```
+
+再得到以HotelID和ReviewID的Review表：
+
+```{r}
+Review <- data_Date %>%
+  select(-HotelURL, -StarClass, -PriceRange, -Services) 
+Review
+```
+
+最后再进行连接测试：
+
+```{r}
+# 原始表：
+nrow(data_Date)
+# 左连接表：
+new_data_left <- left_join(Review, Hotel)
+nrow(new_data_left)
+# 内连接表：
+new_data_inner <- inner_join(Review, Hotel)
+nrow(new_data_inner)
+
+data_Date
+new_data_left
+new_data_inner
+```
+
+根据结果可以发现，最后得到的三个表是一样的。下面做一个测试：
+
+```{r}
+n_distinct(data_Date$ReviewID)
+data_Date %>%
+  filter(is.na(HotelID))
+```
+
+可以看出，ReviewID的数量与行数恰好相等，说明没有确实的ReviewID而且每一个ReviewID仅仅对应一行。而HotelID不存在NA值，这说明每一行的对应的ReviewID总是能恰好对应一个HotelID。
+
+于是我们通过左连接和内连接所得到的两个表将会是与原来的表一致的。
+
+### 问题 4：因子识别与长宽表转换
+
+```{r}
+# 取出部分进行测试
+Hotel_temp <- Hotel %>%
+  select(HotelID, Services) %>%
+  head(3)
+# 单独使用-来观察
+str_view_all(Hotel_temp$Services,"-")
+# 第一次尝试匹配
+str_view_all(Hotel_temp$Services,"(([^ -]+) ){1,}")
+# 观察结果发现遗漏了Self！专门匹配试试？
+str_view_all(Hotel_temp$Services,"(([^ -]+)-)(([^ -]+) ){1,}")
+# 组合在一起
+str_view_all(Hotel_temp$Services,"(([^ -]+) ){1,}|(([^ -]+)-)(([^ -]+) ){1,}")
+
+match_pattern <- c("(([^ -]+) ){1,}|(([^ -]+)-)(([^ -]+) ){1,}")
+
+# 匹配出不重复的服务相关字符，并构建成一个vector
+Ser_temp <- list(Hotel$Services) %>%
+  map(., ~str_extract_all(.,pattern = match_pattern)) %>%
+  unlist(.) %>%
+  unique(.) 
+Ser_temp
+
+# 构建出新小表
+Hotel_new <- Hotel %>%
+  select(HotelID, Services) %>% 
+  append(Ser_temp) %>%
+  data.frame(.)
+Hotel_new # 名字需要调整
+
+#观察名字！
+summary(Hotel_new) 
+# 对新增加的列重新命名  
+colnames(Hotel_new)<-str_replace_all(colnames(Hotel_new),"X.","is_")
+colnames(Hotel_new)<-str_replace_all(colnames(Hotel_new),"[^A-Za-z0-9_]"," ")
+colnames(Hotel_new)<-str_replace_all(colnames(Hotel_new),"`|  $","")
+# 将新增的列转化为bool变量
+for (i in 1:18) {
+  Hotel_new[i+2]<-str_detect(Hotel_new[[2]],Hotel_new[[i+2]][1])
+}
+#重命名
+Service <- Hotel_new
+Service
+```
+
+### 问题 5：数据聚合与面板数据生成
+
+```{r}
+# 构建按照时间顺序递增的Hotel表，其中每个酒店的开始有评论的时间可以不同  
+data_Hotel_time <- data_Date %>%
+  select(HotelID, RatingDate) %>%
+  separate(.,RatingDate,into = c("year", "month", "day"),convert = T) %>%
+  select(-day) %>%
+  arrange(year,month)
+
+# 查看第一行与最后一行对应的时间点，得到面板数据的时间范围
+data_Hotel_time %>% head(10)
+data_Hotel_time %>% 
+  arrange(desc(year),desc(month)) %>%
+  head(10)
+``` 
+
+观察可知，面板数据的范围为从2001年9月到2017年2月。我们生成的表范围最大应当是2001年1月到2017年12月的而且包含HotelID的表
+
+```{r}
+# 生成一个完整的时间表
+data_Hotel_time <- data_Hotel_time %>%
+  complete(HotelID,year,month) %>%
+  group_by(HotelID,year,month) %>%
+  slice(1)
+
+# 为了求累计标准差，专门定义一个acc_sd函数
+acc_sd <- function(df) {
+  x <- vector("double", 0)
+  acc_sd <- vector("double", 0)
+  for (i in seq_along(df)) {
+    x <- c(x, df[[i]])
+    acc_sd <- c(acc_sd, sd(x))
+  }
+  acc_sd[1] = 0
+  acc_sd
+}
+
+# 时刻关注自己的数据在什么层面？要做的计算应该是在什么层面？
+data_Hotel_cal <- data_Date %>%
+  select(HotelID, RatingDate, AvgRatingStarsThisUser) %>%
+  separate(.,RatingDate,into = c("year", "month", "day"),convert = T) %>%
+  filter(!is.na(AvgRatingStarsThisUser)) %>%
+  # 在Hotel层次求解累计标准差
+  group_by(HotelID) %>%
+  arrange(HotelID,year,month,day) %>%
+  mutate(acc_Std_Rating = acc_sd(AvgRatingStarsThisUser)) %>%
+  # 在HotelID，year，month层次求解平均值
+  group_by(HotelID,year,month) %>%
+  summarise(Volume=n(),
+            Avg_Rating = mean(AvgRatingStarsThisUser),
+            Std_Rating = ifelse(Volume==1,0,sd(AvgRatingStarsThisUser)),
+            acc_Std_Rating = acc_Std_Rating[length(acc_Std_Rating)]
+  ) %>%
+  ungroup() %>%
+  # 在Hotel层次求解累计量和累计评分，注意数据已经聚合过一次
+  group_by(HotelID) %>%
+  mutate(acc_Volume = cumsum(Volume),
+         acc_Avg_Rating = cumsum(Volume*Avg_Rating)/cumsum(Volume),
+  ) %>%
+  ungroup() %>%
+  select(HotelID, year, month, Volume, acc_Volume, Avg_Rating, acc_Avg_Rating,Std_Rating,acc_Std_Rating)
+
+# 连接两个表
+Hotel_Rating <- left_join(data_Hotel_time, data_Hotel_cal) %>%
+  group_by(HotelID) %>%
+  mutate(n=row_number()) %>%
+  # 调整数据
+  mutate(first_not_NA = ifelse(n<which.max(!is.na(Volume)),F,T)) %>%
+  filter(first_not_NA==T) %>%
+  mutate(#Volume = ifelse(is.na(Volume),0,Volume),
+         acc_Volume = na.locf(acc_Volume),
+         #Avg_Rating = ifelse(is.na(Avg_Rating),0,Avg_Rating),
+         acc_Avg_Rating = na.locf(acc_Avg_Rating),
+         #Std_Rating = ifelse(is.na(Std_Rating),0,Std_Rating),
+         acc_Std_Rating = na.locf(acc_Std_Rating)) %>%
+  select(-n,-first_not_NA) %>%
+  filter(!(year==2017 & month>2))
+
+nrow(Hotel_Rating)
+
+Hotel_Rating
+```
+
+### 问题 6：探索性数据分析与数据可视化
+
+我们现在有的数据集是：
+
+1.第三问中得到酒店的评论表Review；
+
+2.第五问中得到的酒店层面的评分面板Hotel_Rating，可以和第四问中的Service连接得到信息更大的酒店层面的表Service_Rating；
+
+对Hotel_Rating中缺失当月数据的NA进行处理：
+
+```{r}
+# 对Hotel_Rating中的NA处理
+Hotel_Rating %>%
+  filter(Volume==0)
+Hotel_Rating %>%
+  filter(Avg_Rating==0)
+# 根据前面的做法肯定是有的
+Hotel_Rating %>%
+  filter(Std_Rating==0)
+
+# 将NA调整为0
+Rating <- Hotel_Rating %>%
+  mutate(Volume = ifelse(is.na(Volume),0,Volume),
+         Avg_Rating = ifelse(is.na(Avg_Rating),0,Avg_Rating),
+         Std_Rating = ifelse(is.na(Std_Rating),0,Std_Rating),
+         )
+
+# Service和Hotel_Rating连接生成一张大表,注意所有评论量和评分相关数据均属于当月的数据：
+Service_Rating <- left_join(Hotel_Rating,Service)
+
+```
+
+**数据集探索：感兴趣的问题——是什么影响了酒店的评分？**：
+
+以下的问题体现了我的思考过程，有些提问一开始的预设就可能有问题，因为我一开始的想法就不对，后续提的问题则是对前一问反思得到的结果。
+
+为了简化，我们首先只考虑——酒店最终累计平均分
+
+**问题1: 酒店最终累计平均分的分布情况如何？将其展示出来**
+
+```{r}
+Hotel_Rating %>%
+  select(HotelID,year,month,acc_Avg_Rating) %>%
+  group_by(HotelID) %>%
+  summarise(final_acc_Rating = acc_Avg_Rating[length(acc_Avg_Rating)]) %>%
+  ggplot(data = .) +
+  geom_histogram(aes(x=final_acc_Rating),binwidth = 0.5) +
+  labs(x="最终累计平均得分",
+       y="频数",
+       title = "酒店最终累计平均得分分布图"
+       ) +
+  theme(plot.title=element_text(hjust=0.5))
+# 选用0.5作为间隔是因为评分系统中一般都以0.5分作为最小单位
+```
+
+**问题2: 根据展示的图中，我们可以发现部分酒店累积最终评分很低，部分酒店最终平均得分很高。我们将不到2分的数据和超过4分的数据挑选出来，与服务表连接生成Ser_Rating。然后根据得分情况对其设置因子水平，基组为2~4分的酒店。**
+
+```{r}
+Rating_temp <- Hotel_Rating %>%
+  select(HotelID,year,month,acc_Avg_Rating) %>%
+  group_by(HotelID) %>%
+  summarise(final_acc_Rating = acc_Avg_Rating[length(acc_Avg_Rating)]) 
+
+Ser_Rating <- left_join(Rating_temp, Service) %>%
+  mutate(HotelRanking=ifelse(
+    final_acc_Rating<2,"low",
+    ifelse(final_acc_Rating>4,"high","normal"))) %>%
+  mutate(HotelRanking=as.factor(HotelRanking)) %>%
+  mutate(HotelRanking=fct_relevel(HotelRanking,"normal"))
+```
+
+**问题3:想要知道酒店评分与什么有关，仅仅关注服务层面是不够的，接下来，将酒店与地理信息结合，即连接生成包含HotelID和CityID的表，并观察酒店最终平均得分在City层面是否有显著差异:**
+
+```{r}
+# 生成地点表：
+data_city <- data_ID %>%
+  select(HotelID,CityID) %>%
+  group_by(HotelID) %>%
+  slice(1)
+
+# 生成大表：
+Ser_Rating_city <- left_join(Ser_Rating,data_city) %>%
+  select(HotelID, CityID, everything())
+
+# 观察酒店得分在City层面是否有显著差异：
+# 观察City数量，发现有四个City，分别为30196--Austin，55711--Dallas，56003--Houston，60956--San Antonio，全部都在Texas州。试看City内的酒店数量有无显著差异？ 
+Ser_Rating_city %>%
+  count(CityID) 
+# 对城市重命名
+Ser_Rating_city <- Ser_Rating_city %>%
+  mutate(Cityname = ifelse(CityID==30196,"Austin","Houston")) %>%
+  mutate(Cityname = ifelse(CityID==55711,"Dallas",Cityname)) %>%
+  mutate(Cityname = ifelse(CityID==60956,"San Antonio",Cityname))
+# 绘制分面图
+Ser_Rating_city %>%
+  ggplot(data = ., aes(x=final_acc_Rating)) +
+  geom_density() +
+  facet_wrap(~CityID) +
+  labs(x="最终累计平均得分",
+       y="频数"
+       )
+```
+
+有没有显著差异？好像有又好像没有。这是为什么呢？这可能是因为：我们采用的是最终累计平均得分，这将每家酒店的得分数值的范围显著减小，极端值对数据的影响就变得很小了。
+
+这里回顾前面所做的工作，我推测能够影响酒店评分的因素可能来自两方面：
+
+1.酒店自身情况：比如酒店的星级、酒店所在的地理位置、酒店提供服务的种类、酒店的价格等等；
+
+2.用户方的情况：用户是否在当月反馈评论、用户旅行的方式（即第2问中哪一种方式）、该用户的平均评分等等；
+
+**问题4:根据上一问的回顾生成一张包含必要信息的大表**
+
+```{r}
+Review_temp <- Review %>%
+  separate(.,RatingDate,into = c("year", "month", "day"),convert = T) %>%
+  select(-day) %>%
+  group_by(HotelID, year, month) %>%
+  # 规定缺失值为-1
+  mutate(Check_month_per = ifelse(
+    is.na(sum(CheckDate)/length(CheckDate)),
+    -1,
+    sum(CheckDate)/length(CheckDate)
+  )) %>%
+  ungroup()
+                                 
+Ser_Review_Rating<- full_join(Review_temp,Service_Rating) %>%
+  mutate(Cityname = ifelse(CityID==30196,"Austin","Houston")) %>%
+  mutate(Cityname = ifelse(CityID==55711,"Dallas",Cityname)) %>%
+  mutate(Cityname = ifelse(CityID==60956,"San Antonio",Cityname)) %>%
+  select(HotelID,CityID,Cityname,everything()) %>%
+  select(-X)
+```
+
+**接下来可以做的工作：根据生成的大表Ser_Review_Rating研究：**
+
+1. 用户层面：是否当月给出的评分比隔了一段时间后再次给出的评分要显著更高？或者是否隔了一段时间后再次给出的评分要更接近与给出评论时当月用户的平均给分（用户根据自己的平均给分而不是在酒店的体验给分）？
+
+2. 酒店层面：在酒店星级相同时，在所有服务中，哪项服务对评分的影响最大？如果划分城市后再来分析呢？
+
