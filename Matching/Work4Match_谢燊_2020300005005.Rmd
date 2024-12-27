@@ -13,7 +13,7 @@ library(tidyverse)
 library(stringr)
 library(RecordLinkage)
 getwd()
-setwd("E:/im doc for study/大学生活/大二/课程学习2/面向数据分析的程序设计/大作业/小组作业")
+setwd("Your path")
 ```
 
 ### ReadMe：
