@@ -1,0 +1,489 @@
+---
+title: 'Work For Match'
+author: "谢燊, WHU"
+date: "2022/5/25"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, echo = FALSE, message = FALSE, warning=FALSE}
+knitr::opts_chunk$set(include = FALSE)
+library(tidyverse)
+library(stringr)
+library(RecordLinkage)
+getwd()
+setwd("E:/im doc for study/大学生活/大二/课程学习2/面向数据分析的程序设计/大作业/小组作业")
+```
+
+### ReadMe：
+
+数据集目前匹配3775行，匹配思路为：
+
+1. 直接在原始的两张表中进行精确匹配，得到917行；
+
+2. 按照相同的City进行笛卡尔乘积得到大表，发现部分城市匹配不上，导致大表的精确匹配只有902行，利用anti_join处理得到匹配不上的城市，再更新笛卡尔乘积的大表，此时为905行。在这张大表的基础上进行模糊匹配。
+
+3. 结合levenshteinSim算法和jarowinkler算法进行模糊匹配，设定标准为：
+
+1）HotelAddress的levenshteinSim大于0.85且HotelName的jarowinkler大于0.8，得到2190行；
+
+2）分别按照Tp_HotelID和Tax_HotelID分组后，HotelAddress的levenshteinSim大于0.7且HotelName的jarowinkler大于0.7，得到653+15行；
+
+如果要进一步增加匹配数量，可以再下调临界值
+
+### 导入数据
+
+```{r}
+TripAdvisor <- read.csv("TripAdvisor_Data.csv", encoding="UTF-8")
+Texas_Tax <- read.csv("Texas_Tax_Data.csv", encoding="UTF-8")
+summary(TripAdvisor)
+summary(Texas_Tax)
+```
+
+首先我们将数据导入，同时采用summary函数查看数据的基本特征，同时利用excel打开对应的csv文件与加载的csv文件进行比对，发现导入无误。
+
+接下来开始根据指引解决问题。
+
+### 字段的清洗处理
+
+根据设计指南里的提示，相关关联的字段可能存在重复、缺失、大小不一致、字符前后有空格等问题，我们先进行字段的清洗：
+
+先来看TripAdvisor数据集：
+
+```{r}
+# 查看是否存在缺失值问题，发现没有NA
+TripAdvisor %>%
+  filter(is.na(Tp_HotelID))
+TripAdvisor %>%
+  filter(is.na(Tp_HotelName))
+TripAdvisor %>%
+  filter(is.na(Tp_HotelAddress))
+TripAdvisor %>%
+  filter(is.na(Tp_City))
+# 查看是否服从主键完整性
+TripAdvisor_test <- TripAdvisor %>%
+  group_by(Tp_HotelID) %>%
+  summarise(num_HotelName = n_distinct(Tp_HotelName),
+            num_HotelAdress = n_distinct(Tp_HotelAddress),
+            num_City = n_distinct(Tp_City),
+            )
+TripAdvisor_test %>%
+  filter(num_HotelName > 1)
+TripAdvisor_test %>%
+  filter(num_HotelAdress > 1)
+TripAdvisor_test %>%
+  filter(num_City > 1)
+# 大小写的统一：统一变为大写;同时去掉空格,并去掉名字字符串后面-后面的内容（回头做时发现很多都是关于城市地点的信息
+
+Tidy_TripAdvisor <- TripAdvisor %>%
+  mutate(Tp_HotelName = str_replace_all(Tp_HotelName,"-.+","")) %>%
+  mutate(Tp_HotelName = str_trim(toupper(Tp_HotelName),side="both"),
+         Tp_HotelAddress = str_trim(toupper(Tp_HotelAddress),side="both"),
+         Tp_City = str_trim(toupper(Tp_City),side="both")
+  )
+```
+
+再来看Texas_Tax数据集：
+
+```{r}
+# 查看是否存在缺失值问题，发现没有NA
+Texas_Tax %>%
+  filter(is.na(Tax_HotelID))
+Texas_Tax %>%
+  filter(is.na(Tax_HotelName))
+Texas_Tax %>%
+  filter(is.na(Tax_HotelAddress))
+Texas_Tax %>%
+  filter(is.na(Tax_City))
+# 查看是否服从主键完整性
+Texas_Tax_test <- Texas_Tax %>%
+  group_by(Tax_HotelID) %>%
+  summarise(num_HotelName = n_distinct(Tax_HotelName),
+            num_HotelAdress = n_distinct(Tax_HotelAddress),
+            num_City = n_distinct(Tax_City),
+  )
+Texas_Tax_test %>%
+  filter(num_HotelName > 1)
+Texas_Tax_test %>%
+  filter(num_HotelAdress > 1)
+Texas_Tax_test %>%
+  filter(num_City > 1)
+# 大小写的统一：统一变为大写;同时去掉空格
+Tidy_Texas_Tax <- Texas_Tax %>%
+  mutate(Tax_HotelName = str_replace_all(Tax_HotelName,"-.+","")) %>%
+  mutate(Tax_HotelName = str_trim(toupper(Tax_HotelName),side="both"),
+         Tax_HotelAddress = str_trim(toupper(Tax_HotelAddress),side="both"),
+         Tax_City = str_trim(toupper(Tax_City),side="both")
+  )
+```
+
+### 设计匹配策略
+
+根据说明文档，应当采用酒店名称和酒店地址的双重条件进行匹配
+
+**先来试试精确匹配：**
+
+```{r}
+Accurate_Match <- inner_join(Tidy_TripAdvisor,Tidy_Texas_Tax, 
+                             by = c(
+                              "Tp_HotelName" = "Tax_HotelName",
+                              "Tp_HotelAddress" = "Tax_HotelAddress"
+                              )
+                             ) %>%
+  rename(HotelName=Tp_HotelName) %>%
+  rename(HotelAddress=Tp_HotelAddress)
+
+nrow(Accurate_Match)
+```
+
+
+根据匹配的结果，不难看出只有917行数据被匹配成功，在最开始以HotelID作为的数据集中，HotelID较少的一个数据集也有8252行数据，这说明匹配后的数据集最多的行数是8252，917行与8252行实在相差太远了，我们应当采用模糊匹配。
+
+**通过笛卡尔乘积得到数据集**
+
+按照文档的提示，先生成一个按照城市分块的笛卡尔乘积连接，想要根据城市来连接，因为同一个城市在两个数据集中的表示方法在统一大写后相同。先来看看两个数据集在城市层面有什么区别：
+
+```{r}
+# 根据结果，Tidy_TripAdvisor有539个不同的城市
+City_TripAdvisor <- Tidy_TripAdvisor %>%
+  group_by(Tp_City) %>%
+  summarise(num=n()) 
+nrow(City_TripAdvisor)
+# 根据结果，Tidy_Texas_Tax有735个不同的城市
+City_Texas_Tax <- Tidy_Texas_Tax %>%
+  group_by(Tax_City) %>%
+  summarise(num=n())
+nrow(City_Texas_Tax)
+
+# 试着查看有多少无法连接的城市
+anti_join(City_Texas_Tax, City_TripAdvisor, 
+          by = c("Tax_City"="Tp_City")) %>%
+  nrow() # 存在于City_Texas_Tax而不存在于City_TripAdvisor的城市有234个
+anti_join(City_TripAdvisor, City_Texas_Tax, 
+          by = c("Tp_City"="Tax_City")) %>%
+  nrow() # 存在于City_TripAdvisor而不存在于City_Texas_Tax的城市有38个
+
+# 因为只有同一个城市才需要匹配，所以使用inner_join
+Tidy_TripAdvisor_2 <- Tidy_TripAdvisor %>%
+  mutate(City = Tp_City)
+Tidy_Texas_Tax_2 <- Tidy_Texas_Tax %>%
+  mutate(City = Tax_City)
+
+Cart_Match <- inner_join(Tidy_TripAdvisor_2,Tidy_Texas_Tax_2) %>%
+  select(Tp_HotelID, Tp_HotelName, Tp_HotelAddress, Tp_City, City, Tax_City, Tax_HotelID, Tax_HotelName, Tax_HotelAddress)
+
+nrow(Cart_Match)
+# 通过原始两张表的主键测试来判断是否有NA，发现没有NA，所以连接没有问题
+Cart_Match %>%
+  filter(is.na(Tp_HotelID))
+Cart_Match %>%
+  filter(is.na(Tax_HotelID))
+```
+
+**通过笛卡尔乘积得到的数据集进行精确匹配：**
+
+```{r}
+Accurate_Cart_Match <- Cart_Match %>%
+  filter((Tp_HotelName == Tax_HotelName) & (Tp_HotelAddress == Tax_HotelAddress))
+nrow(Accurate_Cart_Match)
+```
+
+令人惊讶的事情发生了，此时匹配出来的行数只有902行，这比之前的902行少了，用anti_join查看少了哪些数据
+
+```{r}
+# 查看数据为何出问题！
+Miss_join <- anti_join(Accurate_Match, Accurate_Cart_Match) 
+# 恰好为缺失的15行！去看看这15行数据在两个tidy的数据集中是怎么样的
+Miss_Trip <- inner_join(Miss_join, Tidy_TripAdvisor) %>%
+  arrange(Tp_HotelID)
+Miss_Texas <- inner_join(Miss_join, Tidy_Texas_Tax) %>%
+  arrange(Tp_HotelID)
+Miss_Cart <- inner_join(Miss_join, Cart_Match) %>%
+  arrange(Tp_HotelID)
+Miss_Trip
+Miss_Texas
+Miss_Cart
+```
+
+从结果可以看出来，我们这里找到的15行数据对应的Tp_City和Tax_City不同，这一点十分关键，因为我们通过笛卡尔儿乘积得到的数据依据的是城市名字的完全匹配，但事实上，两张表中同一个城市对应的字符串可能不同！我们必须重新构建我们的名字匹配模式来实现正确的笛卡尔乘积的结果：
+
+```{r}
+# 回顾前面的代码，重新思考城市匹配问题
+
+# 再次匹配城市(还可以反着做，一样套路，最终可以得到超级大表)
+Not_Match_City <- anti_join(City_TripAdvisor, City_Texas_Tax, 
+          by = c("Tp_City"="Tax_City")) %>%
+          select(-num)
+
+Not_Match_City_Tax <- anti_join(City_Texas_Tax, City_TripAdvisor, 
+                                  by = c("Tax_City"="Tp_City")) %>%
+  select(-num)
+
+# 生成一个Trip表和一个Tax表，分别为154行和3044行，准备连接
+Not_Match_TripAdvisor <- inner_join(Not_Match_City, Tidy_TripAdvisor_2) %>%
+  mutate(ID = 1)
+Not_Match_Tax <- inner_join(Not_Match_City_Tax, Tidy_Texas_Tax_2) %>%
+  mutate(ID = 1)
+
+
+# 连接得到一个新的笛卡尔乘积的表,这里以ID作为标识，而不是城市，因为城市名字可能存在微小的区别
+Cart_Match_2 <- left_join(Not_Match_TripAdvisor, Not_Match_Tax,by=c("ID"="ID")) %>%
+  mutate(City = Tp_City) %>%
+  select(-ID) %>%
+  select(Tp_HotelID, Tp_HotelName, Tp_HotelAddress, Tp_City, City, Tax_City, Tax_HotelID, Tax_HotelName, Tax_HotelAddress)
+
+# 将第二个生成的笛卡尔乘积的表连接到第一个中
+Cart_Match_Full <- rbind(Cart_Match[1:5,],Cart_Match_2,Cart_Match[6:nrow(Cart_Match), ])  
+
+```
+
+再次用精确匹配的方式：
+
+```{r}
+# 再次进行精确匹配，发现精确匹配上的行数变为905行，比第一个笛卡尔乘积得到的表要多3行，但是比原始表得到的要少12行
+Accurate_Cart_Match_Full <- Cart_Match_Full %>%
+  filter((Tp_HotelName == Tax_HotelName) &
+         (Tp_HotelAddress == Tax_HotelAddress))
+nrow(Accurate_Cart_Match_Full)
+
+# 来查看缺失的数据
+Difference_Match <- anti_join(Accurate_Cart_Match_Full,Accurate_Cart_Match)
+Difference_Match
+Difference_Match_Full <- anti_join(Accurate_Match, Accurate_Cart_Match_Full)
+Difference_Match_Full
+```
+
+根据上面两次生成的笛卡尔乘积表格，我发现我必须进行一个取舍，已经知道不使用笛卡尔乘积得到的表进行精确匹配时得到的数据量为917行；第一个笛卡尔乘积表行数为2360260（230多万），精确匹配出902行数据；第二个笛卡尔乘积表行数为2829036（将近280万行），精确匹配出905行数据；(还做了第三个笛卡尔乘积表（注释掉了），行数为27479348（2700多万行），精确匹配出910行数据），还有一个办法可以保证一定能匹配好，但是有3000多万行
+
+这其中的差异就来自于——有些城市的名字不匹配！比如我们看下列的展示，有：（左边来自trip，右边来自Tax）
+
+1. 是否全写，如：GALVESTON ISLAND和GALVESTON；
+
+2. 是否简写，如：ORANGE和WEST ORANGE
+
+3. 是否错写，如：FALFURRIAS和FULFURRIAS；
+
+```{r}
+Miss_join
+```
+
+综合考虑精确匹配的行数和得到的笛卡尔乘积表的行数，我还是选择了中间可以精确匹配905行的笛卡尔乘积表来进行模糊匹配的工作：
+
+```{r}
+# 先从大笛卡尔乘积表中剔除已经精确匹配的数据
+Accurate_Cart_TripHotelID <- Accurate_Cart_Match_Full %>%
+  select(Tp_HotelID)
+Accurate_Cart_TaxHotelID <- Accurate_Cart_Match_Full %>%
+  select(Tax_HotelID)
+# anti_join得到剔除精确匹配后的大表,然后添加两列作为模糊匹配的依据
+Noacc_Cart_Match <- anti_join(Cart_Match_Full, Accurate_Cart_TaxHotelID) %>%
+  anti_join(.,Accurate_Cart_TripHotelID) %>%
+  # 这一步是因为在匹配中发现有的酒店在名字上之差这一点就配上了
+  mutate(Tp_HotelName = str_replace_all(Tp_HotelName,"&","AND"),
+         Tax_HotelName = str_replace_all(Tax_HotelName,"&","AND")) %>%
+  mutate(like_lev_Name = levenshteinSim(Tp_HotelName, Tax_HotelName),
+         like_lev_Addr = levenshteinSim(Tp_HotelAddress, Tax_HotelAddress),
+         like_jar_Name =jarowinkler(Tp_HotelName, Tax_HotelName),
+         like_jar_Addr =jarowinkler(Tp_HotelName, Tax_HotelName))
+```
+
+```{r}
+ggplot(data = Noacc_Cart_Match,aes(x = like_lev_Name)) +
+  geom_histogram() +
+  xlim(0.6,1)
+
+ggplot(data = Noacc_Cart_Match,aes(x = like_lev_Addr)) +
+  geom_histogram() +
+  xlim(0.6,1)
+
+ggplot(data = Noacc_Cart_Match,aes(x = like_jar_Name)) +
+  geom_histogram() +
+  xlim(0.6,1)
+
+ggplot(data = Noacc_Cart_Match,aes(x = like_jar_Addr)) +
+  geom_histogram() +
+  xlim(0.6,1)
+```
+
+根据柱状图，我发现存在很多名字或地址被完全匹配（数值1）的Hotel，之前选不出来很可能是因为名字或地址的另一个变量有所区别。
+
+根据经验，酒店重名的概率很大，但是地址完全相同的概率要小很多，当然，如果地址的精读只是到某街道甚至区，那么也会有大量重复，在地址方面，我们用levenshteinSim衡量。对于酒店名称，我们认为只要前缀基本一致，后面数字没有问题，就是可以匹配的，一因此在名称方面用jarowinkler进行衡量：
+
+```{r}
+Noacc_Cart_Match_temp1 <- Noacc_Cart_Match %>%
+  filter(like_lev_Addr>0.85 & like_jar_Name>0.8) %>%
+  select(like_lev_Addr,like_lev_Name, like_jar_Addr, like_jar_Name,Tp_HotelName, Tax_HotelName, Tp_HotelAddress, Tax_HotelAddress, everything()) %>%
+  arrange(like_lev_Name)
+
+Noacc_Cart_Match_temp1 %>%
+  group_by(Tp_HotelID) %>%
+  summarise(num = n()) %>%
+  filter(num >1) %>%
+  arrange(desc(num))
+
+wrong1 <- Noacc_Cart_Match_temp1 %>%
+  filter(Tp_HotelID == "73688" )
+wrong1
+# 这里启发我如果存在数字必须保证数字一致！
+
+wrong2 <- Noacc_Cart_Match_temp1 %>%
+  filter(Tp_HotelID == "82279" )
+wrong2
+#这里启发其实原始表中还有错误，不同的ID可能对应的是同一个酒店
+
+wrong3 <- Noacc_Cart_Match_temp1 %>%
+  filter(Tp_HotelID == "21320613" )
+wrong3
+# 这里启发我的还是数字那个问题
+
+
+# 对temp表处理，尝试解决这一问题，无果
+Noacc_Cart_Match_temp2 <- Noacc_Cart_Match_temp1 %>%
+  mutate(Tp_num = str_extract_all(Tp_HotelAddress,"[0-9]+"),
+         Tax_num = str_extract_all(Tax_HotelAddress,"[0-9]+")) %>%
+  mutate(Tp_num = str_c(Tp_num),
+         Tax_num = str_c(Tax_num)) %>%
+  filter(as.integer(Tp_num) == as.integer(Tax_num))
+
+Noacc_Cart_Match_temp2 %>%
+  group_by(Tp_HotelID) %>%
+  summarise(num = n()) %>%
+  filter(num >1) %>%
+  arrange(desc(num))
+
+wrong4 <- Noacc_Cart_Match_temp2 %>%
+  filter(Tp_HotelID == "609493" )
+wrong4
+
+# 直接用anti_join得到好的表
+Rept_Noacc_Cart_Match1 <- Noacc_Cart_Match_temp1 %>%
+  group_by(Tp_HotelID) %>%
+  summarise(num = n()) %>%
+  filter(num >1) %>%
+  arrange(desc(num))
+
+Rept_Noacc_Cart_Match2 <- Noacc_Cart_Match_temp1 %>%
+  group_by(Tax_HotelID) %>%
+  summarise(num = n()) %>%
+  filter(num >1) %>%
+  arrange(desc(num))
+
+Noacc_CM_temp1_F <- anti_join(Noacc_Cart_Match_temp1, Rept_Noacc_Cart_Match1) %>%
+  anti_join(.,Rept_Noacc_Cart_Match2)
+
+```
+
+我们可以认为这些是直接匹配成功的序列，有2190行（需要argue为什么）
+
+将这些已经成功匹配的从笛卡尔大表中剔除，进行下一步工作：
+
+```{r}
+Aft1_Cart_TripHotelID <- Noacc_CM_temp1_F %>%
+  select(Tp_HotelID)
+Aft1_Cart_TaxHotelID <- Noacc_CM_temp1_F %>%
+  select(Tax_HotelID)
+
+Aft1_Noacc_Cart_Match <- anti_join(Noacc_Cart_Match, Aft1_Cart_TripHotelID) %>%
+  anti_join(.,Aft1_Cart_TaxHotelID) 
+# 得到的表为1462991行，即146万行
+```
+
+这一次，采取分组匹配法：
+
+```{r}
+# 这一次，采取分组匹配法：
+
+# 按照Tp_HotelID
+Aft1_Noacc_Cart_Match_temp <- Aft1_Noacc_Cart_Match %>%
+  group_by(Tp_HotelID) %>%
+  arrange(desc(like_lev_Addr),desc(like_jar_Name),desc(like_lev_Name),desc(like_jar_Addr)) %>%
+  select(like_lev_Addr,like_jar_Name,like_lev_Name,like_jar_Addr,Tp_HotelName,Tax_HotelName,Tp_HotelAddress,Tax_HotelAddress,everything()) %>%
+  slice_head(n=5) %>%
+  filter(!(like_lev_Addr < 0.7 | like_jar_Name <0.7)) %>%
+  slice(1)
+
+Rept_Aft1_tax <- Aft1_Noacc_Cart_Match_temp %>%
+  group_by(Tax_HotelID) %>%
+  summarise(num =n()) %>%
+  filter(num>1) %>%
+  select(Tax_HotelID)
+
+Aft1_Noacc_CMatch_Final <- anti_join(Aft1_Noacc_Cart_Match_temp, Rept_Aft1_tax)
+# 更新笛卡尔乘积表
+Aft1_CM_ID <- Aft1_Noacc_CMatch_Final %>%
+  select(Tp_HotelID) 
+Aft2_Noacc_Cart_Match <- anti_join(Aft1_Noacc_Cart_Match, Aft1_CM_ID)
+
+# 按照Tax_HotelID分组
+Aft2_Noacc_Cart_Match_temp <- Aft2_Noacc_Cart_Match %>%
+  group_by(Tax_HotelID) %>%
+  arrange(desc(like_lev_Addr),desc(like_jar_Name),desc(like_lev_Name),desc(like_jar_Addr)) %>%
+  select(like_lev_Addr,like_jar_Name,like_lev_Name,like_jar_Addr,Tp_HotelName,Tax_HotelName,Tp_HotelAddress,Tax_HotelAddress,everything()) %>%
+  slice_head(n=5) %>%
+  filter(!(like_lev_Addr < 0.7 | like_jar_Name <0.7 | like_lev_Name < 0.8)) %>%
+  slice(1)
+
+# 更新笛卡尔乘积表
+Aft2_CM_ID <- Aft2_Noacc_Cart_Match_temp %>%
+  select(Tax_HotelID)
+Aft3_Noacc_Cart_Match <- anti_join(Aft2_Noacc_Cart_Match, Aft2_CM_ID)
+
+```
+
+这一次匹配，又得到了653+15行数据，目前有917+2190+653+15 =3775行数据被认为匹配成功，接下来连接并按照题目要求生成相关的列：
+
+**Accurate_Match; Noacc_CM_temp1_F; Aft1_Noacc_CMatch_Final; Aft2_Noacc_Cart_Match_temp**
+
+```{r}
+# 连接前准备
+Accurate_Match_2 <- Accurate_Match %>%
+  mutate( like_lev_Name = 1,
+          like_lev_Addr = 1,
+          like_jar_Name = 1,
+          like_jar_Addr = 1,
+          Tp_HotelName = HotelName,
+          Tax_HotelName = HotelName,
+          Tp_HotelAddress = HotelAddress,
+          Tax_HotelAddress = HotelAddress,
+          IF_Exact = T,
+          IF_Above_0.85_0.8 = T,
+          IF_Above_0.7_0.7 = T,
+          Reason = "They can be exactly matched."
+  ) %>%
+  select(-HotelName,-HotelAddress) %>%
+  select(like_lev_Addr,like_jar_Name,like_lev_Name,like_jar_Addr,Tp_HotelID,Tax_HotelID,Tp_HotelName,Tax_HotelName,Tp_HotelAddress,Tax_HotelAddress,everything()) 
+
+Noacc_CM_temp1_F_2 <- Noacc_CM_temp1_F %>%
+  mutate( IF_Exact =F ,
+          IF_Above_0.85_0.8 = T,
+          IF_Above_0.7_0.7 = T,
+          Reason = "They can be matched when like_lev_Addr > 0.85 and like_jar_Name > 0.8"
+  ) %>%
+  select(-City) %>%
+  select(like_lev_Addr,like_jar_Name,like_lev_Name,like_jar_Addr,Tp_HotelID,Tax_HotelID,Tp_HotelName,Tax_HotelName,Tp_HotelAddress,Tax_HotelAddress,everything()) 
+
+Aft1_Noacc_CMatch_Final_2 <- Aft1_Noacc_CMatch_Final %>%
+  mutate( IF_Exact =F ,
+          IF_Above_0.85_0.8 = F,
+          IF_Above_0.7_0.7 = T,
+          Reason = "They can be matched when like_lev_Addr > 0.7 and like_jar_Name > 0.7"
+  ) %>%
+  select(-City) %>%
+  select(like_lev_Addr,like_jar_Name,like_lev_Name,like_jar_Addr,Tp_HotelID,Tax_HotelID,Tp_HotelName,Tax_HotelName,Tp_HotelAddress,Tax_HotelAddress,everything()) 
+
+Aft2_Noacc_Cart_Match_temp_2 <- Aft2_Noacc_Cart_Match_temp %>%
+  mutate( IF_Exact =F ,
+          IF_Above_0.85_0.8 = F,
+          IF_Above_0.7_0.7 = T,
+          Reason = "(like_lev_Name > 0.8)They can be matched when like_lev_Addr > 0.7 and like_jar_Name > 0.7"
+  ) %>%
+  select(-City) %>%
+  select(like_lev_Addr,like_jar_Name,like_lev_Name,like_jar_Addr,Tp_HotelID,Tax_HotelID,Tp_HotelName,Tax_HotelName,Tp_HotelAddress,Tax_HotelAddress,everything())
+
+# 连接
+Match <- rbind(Accurate_Match_2[1:5,], Noacc_CM_temp1_F_2, Accurate_Match_2[6:nrow(Accurate_Match_2), ])  
+Match <- rbind(Match[1:5,], Aft1_Noacc_CMatch_Final_2, Match[6:nrow(Match), ])  
+Match <- rbind(Match[1:5,], Aft2_Noacc_Cart_Match_temp_2, Match[6:nrow(Match), ])  
+
+```
